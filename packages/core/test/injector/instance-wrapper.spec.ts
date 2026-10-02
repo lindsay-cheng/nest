@@ -693,6 +693,17 @@ describe('InstanceWrapper', () => {
       instance.addEnhancerMetadata(enhancers[0]);
       expect(instance.getEnhancersMetadata()).toEqual(enhancers);
     });
+
+    it('should keep the host dependency tree static when only enhancers are scoped', () => {
+      const controller = new InstanceWrapper({ scope: Scope.DEFAULT });
+      controller.addEnhancerMetadata(
+        new InstanceWrapper({ scope: Scope.REQUEST }),
+      );
+
+      expect(controller.isDependencyTreeStatic()).toBe(false);
+      expect(controller.isHostDependencyTreeStatic()).toBe(true);
+      expect(controller.isStatic(STATIC_CONTEXT, undefined)).toBe(true);
+    });
   });
 
   describe('when set instance has been called', () => {

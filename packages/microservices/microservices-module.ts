@@ -70,6 +70,7 @@ export class MicroservicesModule<
       ClientProxyFactory,
       exceptionFiltersContext,
       graphInspector,
+      config,
     );
   }
 

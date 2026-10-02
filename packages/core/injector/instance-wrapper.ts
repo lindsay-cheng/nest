@@ -326,6 +326,46 @@ export class InstanceWrapper<T = any> {
     return enhancers ? callback(enhancers, lookupRegistry) : false;
   }
 
+  private introspectHostDependenciesAttribute(
+    callback: (
+      collection: InstanceWrapper[],
+      lookupRegistry: string[],
+    ) => boolean,
+    lookupRegistry: string[] = [],
+  ): boolean {
+    if (lookupRegistry.includes(this[INSTANCE_ID_SYMBOL])) {
+      return false;
+    }
+    lookupRegistry = lookupRegistry.concat(this[INSTANCE_ID_SYMBOL]);
+
+    const { dependencies, properties } = this[INSTANCE_METADATA_SYMBOL];
+
+    let introspectionResult = dependencies
+      ? callback(dependencies, lookupRegistry)
+      : false;
+
+    if (introspectionResult || !properties) {
+      return introspectionResult;
+    }
+    return callback(
+      properties.map(item => item.wrapper),
+      lookupRegistry,
+    );
+  }
+
+  public isHostDependencyTreeStatic(lookupRegistry: string[] = []): boolean {
+    if (this.scope === Scope.REQUEST) {
+      return false;
+    }
+    return !this.introspectHostDependenciesAttribute(
+      (collection, registry) =>
+        collection.some(
+          (item: InstanceWrapper) => !item.isDependencyTreeStatic(registry),
+        ),
+      lookupRegistry,
+    );
+  }
+
   public isDependencyTreeStatic(lookupRegistry: string[] = []): boolean {
     if (!isUndefined(this.isTreeStatic)) {
       return this.isTreeStatic;
@@ -437,7 +477,15 @@ export class InstanceWrapper<T = any> {
     contextId: ContextId,
     inquirer: InstanceWrapper | undefined,
   ): boolean {
-    if (!this.isDependencyTreeStatic() || contextId !== STATIC_CONTEXT) {
+    if (contextId !== STATIC_CONTEXT) {
+      return false;
+    }
+
+    const isStaticHost =
+      this.scope !== Scope.REQUEST && this.isHostDependencyTreeStatic();
+    const isStaticTree = this.isDependencyTreeStatic();
+
+    if (!isStaticTree && !isStaticHost) {
       return false;
     }
 

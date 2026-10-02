@@ -34,11 +34,13 @@ import { Server } from './server/server.js';
 import { type Controller, isUndefined } from '@nestjs/common/internal';
 import {
   ContextIdFactory,
+  type ApplicationConfig,
   type NestContainer,
   type ContextId,
   type GraphInspector,
   MetadataScanner,
 } from '@nestjs/core';
+import { isStaticHost } from '@nestjs/core/helpers/is-static-host.util.js';
 import {
   ExecutionContextHost,
   STATIC_CONTEXT,
@@ -62,6 +64,7 @@ export class ListenersController {
     private readonly clientFactory: IClientProxyFactory,
     private readonly exceptionFiltersContext: ExceptionFiltersContext,
     private readonly graphInspector: GraphInspector,
+    private readonly applicationConfig: ApplicationConfig,
   ) {}
 
   public registerPatternHandlers(
@@ -71,7 +74,9 @@ export class ListenersController {
   ) {
     const { instance } = instanceWrapper;
 
-    const isStatic = instanceWrapper.isDependencyTreeStatic();
+    const globalScopedEnhancers = this.getGlobalScopedEnhancers();
+    const isStatic = isStaticHost(instanceWrapper, globalScopedEnhancers);
+    const hasGlobalScopedEnhancers = globalScopedEnhancers.length > 0;
     const patternHandlers = this.metadataExplorer.explore(instance);
     const moduleRef = this.container.getModuleByKey(moduleKey);
     const defaultCallMetadata =
@@ -107,7 +112,7 @@ export class ListenersController {
           serverInstance.transportId!,
         );
 
-        if (isStatic) {
+        if (isStatic && !hasGlobalScopedEnhancers) {
           const proxy = this.contextCreator.create(
             instance,
             targetCallback,
@@ -247,8 +252,15 @@ export class ListenersController {
   ) {
     const collection = moduleRef.controllers;
     const { instance } = wrapper;
-
-    const isTreeDurable = wrapper.isDependencyTreeDurable();
+    const globalScopedEnhancers = this.getGlobalScopedEnhancers();
+    const isStatic = isStaticHost(wrapper, globalScopedEnhancers);
+    const isTreeDurable = isStatic
+      ? this.areGlobalScopedEnhancersDurable()
+      : wrapper.isDependencyTreeDurable();
+    const scopedEnhancers = [
+      ...(isStatic ? wrapper.getEnhancersMetadata() || [] : []),
+      ...this.getGlobalScopedEnhancers(),
+    ];
 
     const requestScopedHandler: MessageHandler = async (...args: unknown[]) => {
       try {
@@ -269,12 +281,31 @@ export class ListenersController {
           dataOrContextHost = request;
         }
 
-        const contextInstance = await this.injector.loadPerContext(
-          instance,
-          moduleRef,
-          collection,
-          contextId,
-        );
+        let contextInstance: Controller;
+        if (isStatic) {
+          await this.injector.loadController(
+            wrapper,
+            moduleRef,
+            STATIC_CONTEXT,
+          );
+          contextInstance =
+            wrapper.getInstanceByContextId(STATIC_CONTEXT).instance;
+        } else {
+          contextInstance = await this.injector.loadPerContext(
+            instance,
+            moduleRef,
+            collection,
+            contextId,
+          );
+        }
+        if (isStatic && scopedEnhancers.length) {
+          await this.injector.loadEnhancersPerContext(
+            wrapper,
+            contextId,
+            wrapper,
+            scopedEnhancers,
+          );
+        }
         const proxy = this.contextCreator.create(
           contextInstance,
           contextInstance[methodKey],
@@ -313,6 +344,24 @@ export class ListenersController {
       }
     };
     return requestScopedHandler;
+  }
+
+  private areGlobalScopedEnhancersDurable(): boolean {
+    const scopedEnhancers = this.getGlobalScopedEnhancers().filter(
+      wrapper => !wrapper.isDependencyTreeStatic(),
+    );
+    return (
+      scopedEnhancers.length > 0 &&
+      scopedEnhancers.every(wrapper => wrapper.isDependencyTreeDurable())
+    );
+  }
+
+  private getGlobalScopedEnhancers(): InstanceWrapper[] {
+    return [
+      ...this.applicationConfig.getGlobalRequestGuards(),
+      ...this.applicationConfig.getGlobalRequestPipes(),
+      ...this.applicationConfig.getGlobalRequestInterceptors(),
+    ];
   }
 
   private getContextId<T extends RequestContext = any>(

@@ -18,6 +18,7 @@ import { RoutePathMetadata } from '../../router/interfaces/route-path-metadata.i
 import { RoutePathFactory } from '../../router/route-path-factory.js';
 import { RouterExceptionFilters } from '../../router/router-exception-filters.js';
 import { RouterExplorer } from '../../router/router-explorer.js';
+import { REQUEST_CONTEXT_ID } from '../../router/request/request-constants.js';
 import { NoopHttpAdapter } from '../utils/noop-adapter.js';
 
 describe('RouterExplorer', () => {
@@ -212,6 +213,67 @@ describe('RouterExplorer', () => {
   });
 
   describe('createRequestScopedHandler', () => {
+    it('should load global enhancers for a singleton controller without resolving it per context', async () => {
+      class Controller {
+        getTest() {}
+      }
+      const controller = new Controller();
+      const wrapper = new InstanceWrapper({
+        token: Controller,
+        metatype: Controller,
+        instance: controller,
+        isResolved: true,
+      });
+      const moduleRef = {
+        controllers: new Map([[Controller, wrapper]]),
+      } as any;
+      const guard = new InstanceWrapper();
+      applicationConfig.addGlobalRequestGuard(guard);
+      vi.spyOn(container, 'registerRequestProvider').mockImplementation(
+        () => undefined,
+      );
+      vi.spyOn(wrapper, 'getInstanceByContextId').mockReturnValue({
+        instance: controller,
+      } as any);
+      const loadController = vi
+        .spyOn(injector, 'loadController')
+        .mockResolvedValue();
+      const loadPerContext = vi.spyOn(injector, 'loadPerContext');
+      const loadEnhancers = vi
+        .spyOn(injector, 'loadEnhancersPerContext')
+        .mockResolvedValue();
+      const createProxy = vi
+        .spyOn(routerBuilder as any, 'createCallbackProxy')
+        .mockReturnValue(vi.fn());
+      const req = {};
+
+      await routerBuilder.createRequestScopedHandler(
+        wrapper,
+        RequestMethod.GET,
+        moduleRef,
+        'moduleKey',
+        'getTest',
+      )(req, null, null!);
+
+      expect(loadController).toHaveBeenCalled();
+      expect(loadPerContext).not.toHaveBeenCalled();
+      expect(loadEnhancers).toHaveBeenCalledWith(
+        wrapper,
+        req[REQUEST_CONTEXT_ID as any],
+        wrapper,
+        [guard],
+      );
+      expect(createProxy).toHaveBeenCalledWith(
+        controller,
+        controller.getTest,
+        'getTest',
+        'moduleKey',
+        RequestMethod.GET,
+        req[REQUEST_CONTEXT_ID as any],
+        wrapper.id,
+      );
+    });
+
     let nextSpy: ReturnType<typeof vi.fn>;
 
     beforeEach(() => {

@@ -77,6 +77,7 @@ describe('ListenersController', () => {
       ClientProxyFactory,
       exceptionFiltersContext,
       graphInspector,
+      new ApplicationConfig(),
     );
     (instance as any).metadataExplorer = metadataExplorer;
     addSpy = vi.fn();
@@ -272,9 +273,10 @@ describe('ListenersController', () => {
       const wrapper = new InstanceWrapper({ instance: { [methodKey]: {} } });
 
       it('should pass all arguments to the proxy chain', async () => {
-        vi.spyOn(injector, 'loadPerContext').mockImplementation(() =>
-          Promise.resolve({}),
-        );
+        vi.spyOn(wrapper, 'getInstanceByContextId').mockReturnValue({
+          instance: wrapper.instance,
+        } as any);
+        vi.spyOn(injector, 'loadController').mockResolvedValue();
         const handler = instance.createRequestScopedHandler(
           wrapper,
           patterns,
@@ -297,7 +299,10 @@ describe('ListenersController', () => {
         controllers: new Map(),
       } as any;
       const patterns = [{}];
-      const wrapper = new InstanceWrapper({ instance: { [methodKey]: {} } });
+      const wrapper = new InstanceWrapper({
+        instance: { [methodKey]: {} },
+        scope: Scope.REQUEST,
+      });
 
       it('should delegate error to exception filters', async () => {
         vi.spyOn(injector, 'loadPerContext').mockImplementation(() => {
@@ -452,7 +457,7 @@ describe('ListenersController', () => {
         .mockReturnValueOnce(slowHandlerResult('next'));
       const createHandler = () =>
         instance.createRequestScopedHandler(
-          new InstanceWrapper({ instance: {} }),
+          new InstanceWrapper({ instance: {}, scope: Scope.REQUEST }),
           {},
           { controllers: new Map() } as any,
           'moduleKey',

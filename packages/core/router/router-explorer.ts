@@ -15,6 +15,7 @@ import { NestContainer } from '../injector/container.js';
 import { Injector } from '../injector/injector.js';
 import { ContextId, InstanceWrapper } from '../injector/instance-wrapper.js';
 import { Module } from '../injector/module.js';
+import { isStaticHost } from '../helpers/is-static-host.util.js';
 import { GraphInspector } from '../inspector/graph-inspector.js';
 import {
   Entrypoint,
@@ -74,20 +75,26 @@ export class RouterExplorer {
     private readonly injector: Injector,
     private readonly routerProxy: RouterProxy,
     private readonly exceptionsFilter: ExceptionsFilter,
-    config: ApplicationConfig,
+    private readonly applicationConfig: ApplicationConfig,
     private readonly routePathFactory: RoutePathFactory,
     private readonly graphInspector: GraphInspector,
   ) {
     this.pathsExplorer = new PathsExplorer(metadataScanner);
 
-    const routeParamsFactory = new RouteParamsFactory(config);
-    const pipesContextCreator = new PipesContextCreator(container, config);
+    const routeParamsFactory = new RouteParamsFactory(applicationConfig);
+    const pipesContextCreator = new PipesContextCreator(
+      container,
+      applicationConfig,
+    );
     const pipesConsumer = new PipesConsumer();
-    const guardsContextCreator = new GuardsContextCreator(container, config);
+    const guardsContextCreator = new GuardsContextCreator(
+      container,
+      applicationConfig,
+    );
     const guardsConsumer = new GuardsConsumer();
     const interceptorsContextCreator = new InterceptorsContextCreator(
       container,
-      config,
+      applicationConfig,
     );
     const interceptorsConsumer = new InterceptorsConsumer();
 
@@ -183,22 +190,25 @@ export class RouterExplorer {
       .get(router, requestMethod)
       .bind(router);
 
-    const isRequestScoped = !instanceWrapper.isDependencyTreeStatic();
-    const proxy = isRequestScoped
-      ? this.createRequestScopedHandler(
-          instanceWrapper,
-          requestMethod,
-          this.container.getModuleByKey(moduleKey)!,
-          moduleKey,
-          methodName,
-        )
-      : this.createCallbackProxy(
-          instance,
-          targetCallback,
-          methodName,
-          moduleKey,
-          requestMethod,
-        );
+    const globalScopedEnhancers = this.getGlobalScopedEnhancers();
+    const isStatic = isStaticHost(instanceWrapper, globalScopedEnhancers);
+    const hasGlobalScopedEnhancers = globalScopedEnhancers.length > 0;
+    const proxy =
+      isStatic && !hasGlobalScopedEnhancers
+        ? this.createCallbackProxy(
+            instance,
+            targetCallback,
+            methodName,
+            moduleKey,
+            requestMethod,
+          )
+        : this.createRequestScopedHandler(
+            instanceWrapper,
+            requestMethod,
+            this.container.getModuleByKey(moduleKey)!,
+            moduleKey,
+            methodName,
+          );
 
     const isVersioned =
       (routePathMetadata.methodVersion ||
@@ -447,8 +457,15 @@ export class RouterExplorer {
   ) {
     const { instance } = instanceWrapper;
     const collection = moduleRef.controllers;
-
-    const isTreeDurable = instanceWrapper.isDependencyTreeDurable();
+    const globalScopedEnhancers = this.getGlobalScopedEnhancers();
+    const isStatic = isStaticHost(instanceWrapper, globalScopedEnhancers);
+    const isTreeDurable = isStatic
+      ? this.areGlobalScopedEnhancersDurable()
+      : instanceWrapper.isDependencyTreeDurable();
+    const scopedEnhancers = [
+      ...(isStatic ? instanceWrapper.getEnhancersMetadata() || [] : []),
+      ...this.getGlobalScopedEnhancers(),
+    ];
 
     return async <TRequest extends Record<any, any>, TResponse>(
       req: TRequest,
@@ -457,12 +474,31 @@ export class RouterExplorer {
     ) => {
       try {
         const contextId = this.getContextId(req, isTreeDurable);
-        const contextInstance = await this.injector.loadPerContext(
-          instance,
-          moduleRef,
-          collection,
-          contextId,
-        );
+        let contextInstance: Controller;
+        if (isStatic) {
+          await this.injector.loadController(
+            instanceWrapper,
+            moduleRef,
+            STATIC_CONTEXT,
+          );
+          contextInstance =
+            instanceWrapper.getInstanceByContextId(STATIC_CONTEXT).instance;
+        } else {
+          contextInstance = await this.injector.loadPerContext(
+            instance,
+            moduleRef,
+            collection,
+            contextId,
+          );
+        }
+        if (isStatic && scopedEnhancers.length) {
+          await this.injector.loadEnhancersPerContext(
+            instanceWrapper,
+            contextId,
+            instanceWrapper,
+            scopedEnhancers,
+          );
+        }
         await this.createCallbackProxy(
           contextInstance,
           contextInstance[methodName],
@@ -488,6 +524,24 @@ export class RouterExplorer {
         exceptionFilter.next(err, host);
       }
     };
+  }
+
+  private areGlobalScopedEnhancersDurable(): boolean {
+    const scopedEnhancers = this.getGlobalScopedEnhancers().filter(
+      wrapper => !wrapper.isDependencyTreeStatic(),
+    );
+    return (
+      scopedEnhancers.length > 0 &&
+      scopedEnhancers.every(wrapper => wrapper.isDependencyTreeDurable())
+    );
+  }
+
+  private getGlobalScopedEnhancers(): InstanceWrapper[] {
+    return [
+      ...this.applicationConfig.getGlobalRequestGuards(),
+      ...this.applicationConfig.getGlobalRequestPipes(),
+      ...this.applicationConfig.getGlobalRequestInterceptors(),
+    ];
   }
 
   private getContextId<T extends Record<any, unknown> = any>(
